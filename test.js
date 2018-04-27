@@ -8,7 +8,19 @@ describe('mana', function () {
   var mana = new Mana();
 
   describe('construction', function () {
-    it('is exposed as function');
+    it('is exposed as a function', function() {
+      assume(Mana).is.a('function');
+    });
+
+    it('exposes the token interface', function() {
+      assume(Mana.Token).is.a('function');
+    });
+
+    it('exposes a `new` function that returns an instance of mana', function() {
+      assume(Mana.new).is.a('function');
+      assume(Mana.new()).is.instanceOf(Mana);
+    });
+
     it('calls the initialise function');
   });
 
@@ -171,49 +183,51 @@ describe('mana', function () {
     });
   });
 
-  describe('#roll', function () {
-    beforeEach(function () {
-      mana.tokens = ['foo'];
-      mana.tokenizer();
-      mana.authorization = mana.tokens[0].authorization;
-
-      mana.ratelimit = 9000;
-      mana.remaining = 0;
-      mana.ratereset = Date.now() / 1000;
-    });
-
-    it('resets the current token to the current rate limit', function () {
-      mana.roll();
-      var token = mana.tokens[0];
-
-      assume(token.ratelimit).to.equal(mana.ratelimit);
-      assume(token.remaining).to.equal(9000);
-      assume(token.ratereset).to.equal(mana.ratereset);
-    });
-
-    it('returns boolean values indicating a working token', function () {
-      assume(mana.roll()).to.equal(true);
-
-      mana.remaining = 0;
-      mana.ratereset = (Date.now() / 1000) + 100;
-      assume(mana.roll()).to.equal(false);
-    });
-
-    it('returns the most optimal token', function () {
-      mana.tokens = ['foob', 'bar', 'baz', 'oof', 'zab'];
-      mana.tokenizer();
-      mana.tokens.forEach(function (token) {
-        token.ratelimit = 9000;
-        token.remaining = 10;
-        token.ratereset = Date.now();
+  ['headers', 'graphql'].forEach(function(type) {
+    describe('#roll - ' + type, function () {
+      beforeEach(function () {
+        mana.tokens = ['foo'];
+        mana.tokenizer();
+        mana.authorization = mana.tokens[0].authorization;
+  
+        mana[type].ratelimit = 9000;
+        mana[type].remaining = 0;
+        mana[type].ratereset = Date.now() / 1000;
       });
-
-      var token = mana.tokens[2];
-      mana.tokens[1].remaining = token.remaining = 1000;
-      token.ratelimit = 10000;
-
-      assume(mana.roll()).to.equal(true);
-      assume(token.authorization).to.equal(mana.authorization);
+  
+      it('resets the current token to the current rate limit', function () {
+        mana.roll(type);
+        var token = mana.tokens[0];
+  
+        assume(token[type].ratelimit).to.equal(mana[type].ratelimit);
+        assume(token[type].remaining).to.equal(9000);
+        assume(token[type].ratereset).to.equal(mana[type].ratereset);
+      });
+  
+      it('returns boolean values indicating a working token', function () {
+        assume(mana.roll(type)).to.equal(true);
+  
+        mana[type].remaining = 0;
+        mana[type].ratereset = (Date.now() / 1000) + 100;
+        assume(mana.roll(type)).to.equal(false);
+      });
+  
+      it('returns the most optimal token', function () {
+        mana.tokens = ['foob', 'bar', 'baz', 'oof', 'zab'];
+        mana.tokenizer();
+        mana.tokens.forEach(function (token) {
+          token[type].ratelimit = 9000;
+          token[type].remaining = 10;
+          token[type].ratereset = Date.now();
+        });
+  
+        var token = mana.tokens[2];
+        mana.tokens[1][type].remaining = token[type].remaining = 1000;
+        token[type].ratelimit = 10000;
+  
+        assume(mana.roll(type)).to.equal(true);
+        assume(token.authorization).to.equal(mana.authorization);
+      });
     });
   });
 
@@ -235,9 +249,12 @@ describe('Tokens', function () {
     , mana = new Mana();
 
   it('sets all values to Infinity', function () {
-    assume(token.ratelimit).to.equal(Infinity);
-    assume(token.ratereset).to.equal(Infinity);
-    assume(token.remaining).to.equal(Infinity);
+    assume(token.headers.ratelimit).to.equal(Infinity);
+    assume(token.headers.ratereset).to.equal(Infinity);
+    assume(token.headers.remaining).to.equal(Infinity);
+    assume(token.graphql.ratelimit).to.equal(Infinity);
+    assume(token.graphql.ratereset).to.equal(Infinity);
+    assume(token.graphql.remaining).to.equal(Infinity);
   });
 
   it('transforms the given token to an correct Authorization header value', function () {
@@ -249,36 +266,38 @@ describe('Tokens', function () {
     assume(token.authorization).equals('prefix-lol foo');
   });
 
-  describe("#available", function () {
-    beforeEach(function () {
-      token.ratelimit = 0;
-      token.ratereset = (Date.now() / 1000) + 100;
-      token.remaining = 0;
-    });
+  ['headers', 'graphql'].forEach(function(type) {
+    describe('#available - ' + type, function () {
+      beforeEach(function () {
+        token[type].ratelimit = 0;
+        token[type].ratereset = (Date.now() / 1000) + 100;
+        token[type].remaining = 0;
+      });
 
-    it('is unavailable if values are zero', function () {
-      assume(token.available()).to.equal(false);
-    });
+      it('is unavailable if values are zero', function () {
+        assume(token.available(type)).to.equal(false);
+      });
 
-    it('is available when fist initialised', function () {
-      assume((new Token()).available()).to.equal(true);
-    });
+      it('is available when fist initialised', function () {
+        assume((new Token()).available(type)).to.equal(true);
+      });
 
-    it('is available if it has remaining rates', function () {
-      assume(token.available()).to.equal(false);
+      it('is available if it has remaining rates', function () {
+        assume(token.available(type)).to.equal(false);
 
-      token.remaining = 1;
-      assume(token.available()).to.equal(true);
-    });
+        token[type].remaining = 1;
+        assume(token.available(type)).to.equal(true);
+      });
 
-    it('is available if our rate has been reset', function () {
-      assume(token.available()).to.equal(false);
+      it('is available if our rate has been reset', function () {
+        assume(token.available(type)).to.equal(false);
 
-      token.ratereset = (Date.now() / 1000) - 10;
-      assume(token.available()).to.equal(true);
+        token[type].ratereset = (Date.now() / 1000) - 10;
+        assume(token.available(type)).to.equal(true);
 
-      token.ratereset = (Date.now() / 1000) + 10;
-      assume(token.available()).to.equal(false);
+        token[type].ratereset = (Date.now() / 1000) + 10;
+        assume(token.available(type)).to.equal(false);
+      });
     });
   });
 });

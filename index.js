@@ -17,6 +17,8 @@ var EventEmitter = require('eventemitter3')
 var toString = Object.prototype.toString
   , slice = Array.prototype.slice;
 
+var RATE_LIMIT_TYPES = ['headers', 'graphql'];
+
 /**
  * Give me mana.
  *
@@ -28,9 +30,15 @@ function Mana() {
 
   this.fnqueue = Object.create(null);   // Callback queue.
   this.authHeader = 'Authorization';    // Default auth header
-  this.remaining = 0;                   // How many API calls are remaining.
-  this.ratelimit = 0;                   // The amount of API calls allowed.
-  this.ratereset = 0;                   // In how many seconds is the rate limit reset.
+
+  RATE_LIMIT_TYPES.forEach(function(type) {
+    this[type] = {
+      remaining: 0,                     // How many API calls are remaining.
+      ratelimit: 0,                     // The amount of API calls allowed.
+      ratereset: 0                      // In how many seconds is the rate limit reset.
+    }
+  }, this);
+
   this.tokens = [];                     // Our default API tokens.
 
   //
@@ -40,7 +48,6 @@ function Mana() {
   this.debug = diagnostics('mana:'+ this.name);
 
   if ('function' === this.type(this.initialise)) this.initialise.apply(this, arguments);
-  if ('function' === this.type(this.initialize)) this.initialize.apply(this, arguments);
 
   //
   // This is a required option, we cannot continue properly if we don't have an
@@ -217,6 +224,7 @@ Mana.prototype.bail = function bail(fn, err, data) {
   return assign;
 };
 
+
 /**
  * Shake'n'roll the tokens to get a token with the highest likelihood of
  * working.
@@ -224,14 +232,16 @@ Mana.prototype.bail = function bail(fn, err, data) {
  * @returns {Boolean} Successful shake, set a new token.
  * @api private
  */
-Mana.prototype.roll = function roll() {
+Mana.prototype.roll = function roll(ratelimitType) {
   var mana = this
     , tokens;
+
+  ratelimitType = ratelimitType || RATE_LIMIT_TYPES[0];
 
   //
   // There is no need to re-roll, we still have remaning tokens.
   //
-  if (this.remaining) return true;
+  if (this[ratelimitType].remaining) return true;
 
   //
   // Find the current token in our token set so we can update it's `ratelimit`
@@ -245,8 +255,11 @@ Mana.prototype.roll = function roll() {
   });
 
   tokens = this.tokens.filter(function filter(token) {
-    return token.available();
+    return token.available(ratelimitType);
   }).sort(function sort(b, a) {
+    a = a[ratelimitType];
+    b = b[ratelimitType];
+
     if (a.remaining !== b.remaining) {
       if (a.remaining < b.remaining) return -1;
       if (a.remaining > b.remaining) return 1;
@@ -277,7 +290,7 @@ Mana.prototype.tokenizer = function tokenizer() {
   }).map(function tokenizing(OAuth) {
     if (OAuth instanceof Token) return OAuth;
 
-    return new Token(OAuth, mana.prefix);
+    return new Token(OAuth, mana.prefix, RATE_LIMIT_TYPES);
   });
 
   return this;
@@ -540,6 +553,42 @@ Mana.prototype.fireforget = function fireforget(args) {
   return this;
 };
 
+Mana.prototype.getLimitType = function getLimitType(ratereset, ratelimit, remaining) {
+  return (
+    !isNaN(ratereset) ||
+    !isNaN(ratelimit) || 
+    !isNaN(remaining)
+  ) ? RATE_LIMIT_TYPES[0] : RATE_LIMIT_TYPES[1];
+}
+
+Mana.prototype.parseRatelimitInfo = function parseRatelimitInfo(res, body) {
+  var ratereset = +res.headers['x-ratelimit-reset']
+    , ratelimit = +res.headers['x-ratelimit-limit']
+    , remaining = +res.headers['x-ratelimit-remaining'];
+
+  var ratelimitType = this.getLimitType(ratereset, ratelimit, remaining);
+
+  if (!isNaN(ratereset)) this[ratelimitType].ratereset = ratereset;
+  if (!isNaN(ratelimit)) this[ratelimitType].ratelimit = ratelimit;
+  if (!isNaN(remaining)) {
+    this[ratelimitType].remaining = remaining;
+    mana.debug('Only %d API request remaining', remaining);
+  }
+
+  // Assume we have are hitting a graphql api
+  if(ratelimitType === 'graphql') {
+    if(body && body.data && body.data.rateLimit) {
+      var resRateLimit = body.data.rateLimit;
+      this[ratelimitType].ratereset = resRateLimit.resetAt;
+      this[ratelimitType].ratelimit = resRateLimit.limit;
+      this[ratelimitType].remaining = resRateLimit.remaining;
+      mana.debug('Only %d API request remaining', remaining);
+    }
+  }
+
+  return ratelimitType;
+}
+
 /**
  * Query against a given API endpoint.
  *
@@ -600,8 +649,24 @@ Mana.prototype.send = function send(args) {
           args.options
         ),
         args.options.params
-    );
+      );
     } else {
+      if(~args.str.indexOf('graphql')) {
+        var query = args.options.query || '{ \n }';
+
+        if(!~query.indexOf('rateLimit')) {
+          var queryEnd = query.lastIndexOf('}');
+          var rateLimitFrag = '\n fragment rateLimit on Query { rateLimit { limit cost remaining resetAt } }';
+      
+          query = query.slice(0, queryEnd) + '  ...rateLimit \n' + query.slice(queryEnd);
+          query += rateLimitFrag;
+
+          args.options.params = args.options.params || {};
+          args.options.params.query = query;
+          args.options.query = query;
+        }
+      }
+
       options.json = this.json(args.options, args.options.params);
     }
   }
@@ -691,20 +756,23 @@ Mana.prototype.send = function send(args) {
        * @api private
        */
       function parse(err, res, body) {
+        var ratelimitType = RATE_LIMIT_TYPES[0];
         mana.debug('Response headers %j', res && res.headers || {});
         assign.emit('headers', res && res.headers || {});
 
         if (err) {
           mana.debug('Received an error (%s) for URL %s', err.message, options.uri);
 
+          ratelimitType = ~options.uri.indexOf('graphql') ? RATE_LIMIT_TYPES[0] : RATE_LIMIT_TYPES[1]; // guess at the api type
+
           err.url = options.uri;          // The URL we accessed.
           err.statusCode = 500;           // Force status code.
           err.errors = errors;            // Previous errors.
           err.body = body;                // The response body.
           err.data = {};                  // The parsed data.
-          err.remaining = mana.remaining; // Rate remaining.
-          err.ratereset = mana.ratereset; // Rate reset.
-          err.ratelimit = mana.ratelimit; // Rate limit.
+          err.remaining = mana[ratelimitType].remaining; // Rate remaining.
+          err.ratereset = mana[ratelimitType].ratereset; // Rate reset.
+          err.ratelimit = mana[ratelimitType].ratelimit; // Rate limit.
 
           return assign.destroy(err);
         }
@@ -714,16 +782,7 @@ Mana.prototype.send = function send(args) {
         // rate limit, so make sure we parse that out before we start handling
         // potential errors.
         //
-        var ratereset = +res.headers['x-ratelimit-reset']
-          , ratelimit = +res.headers['x-ratelimit-limit']
-          , remaining = +res.headers['x-ratelimit-remaining'];
-
-        if (!isNaN(ratereset)) mana.ratereset = ratereset;
-        if (!isNaN(ratelimit)) mana.ratelimit =  ratelimit;
-        if (!isNaN(remaining)) {
-          mana.remaining = remaining;
-          mana.debug('Only %d API request remaining', remaining);
-        }
+        ratelimitType = mana.parseRatelimitInfo(res, body);
 
         //
         // We had a successful cache hit, use our cached result as response
@@ -744,7 +803,7 @@ Mana.prototype.send = function send(args) {
         if (
              mana.tokens.length
            && (
-             (403 === res.statusCode && 0 === mana.remaining)
+             (403 === res.statusCode && 0 === mana[ratelimitType].remaining)
              || 401 === res.statusCode
            )
         ) {
@@ -754,7 +813,7 @@ Mana.prototype.send = function send(args) {
             mana.debug('Weve reached our API limit with `%s`, trying another token', mana.authorization);
           }
 
-          if (mana.roll()) {
+          if (mana.roll(ratelimitType)) {
             options.headers.Authorization = mana.authorization;
             mana.debug('Successfully switched from authorization tokens');
 
@@ -783,9 +842,9 @@ Mana.prototype.send = function send(args) {
           err.errors = errors;            // Previous errors.
           err.body = body;                // The response body.
           err.data = {};                  // Parsed response.
-          err.remaining = mana.remaining; // Rate remaining.
-          err.ratereset = mana.ratereset; // Rate reset.
-          err.ratelimit = mana.ratelimit; // Rate limit.
+          err.remaining = mana[ratelimitType].remaining; // Rate remaining.
+          err.ratereset = mana[ratelimitType].ratereset; // Rate reset.
+          err.ratelimit = mana[ratelimitType].ratelimit; // Rate limit.
 
           return next(err);
         }
@@ -818,9 +877,9 @@ Mana.prototype.send = function send(args) {
             e.errors = errors;            // Previous errors.
             e.body = body;                // The response body.
             e.data = {};                  // Parsed response.
-            e.remaining = mana.remaining; // Rate remaining.
-            e.ratereset = mana.ratereset; // Rate reset.
-            e.ratelimit = mana.ratelimit; // Rate limit.
+            e.remaining = mana[ratelimitType].remaining; // Rate remaining.
+            e.ratereset = mana[ratelimitType].ratereset; // Rate reset.
+            e.ratelimit = mana[ratelimitType].ratelimit; // Rate limit.
 
             return next(e);
           }
@@ -841,9 +900,9 @@ Mana.prototype.send = function send(args) {
           err.errors = errors;             // Previous errors.
           err.body = body;                 // The response body.
           err.data = data;                 // Parsed response.
-          err.remaining = mana.remaining;  // Rate remaining.
-          err.ratereset = mana.ratereset;  // Rate reset.
-          err.ratelimit = mana.ratelimit;  // Rate limit.
+          err.remaining = mana[ratelimitType].remaining;  // Rate remaining.
+          err.ratereset = mana[ratelimitType].ratereset;  // Rate reset.
+          err.ratelimit = mana[ratelimitType].ratelimit;  // Rate limit.
 
           return assign.destroy(err);
         }
@@ -909,9 +968,9 @@ Mana.prototype.send = function send(args) {
         failure.errors = errors;            // Reference to errors.
         failure.body = '';                  // Returned body>
         failure.data = {};                  // Parsed response.
-        failure.remaining = mana.remaining; // Rate remaining.
-        failure.ratereset = mana.ratereset; // Rate reset.
-        failure.ratelimit = mana.ratelimit; // Rate limit.
+        failure.remaining = mana[ratelimitType].remaining; // Rate remaining.
+        failure.ratereset = mana[ratelimitType].ratereset; // Rate reset.
+        failure.ratelimit = mana[ratelimitType].ratelimit; // Rate limit.
 
         assign.destroy(failure);
       }, args.options.backoff);

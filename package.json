@@ -4,7 +4,8 @@
   "description": "mana potion",
   "main": "index.js",
   "scripts": {
-    "test": "mocha test.js"
+    "test": "mocha test.js",
+    "test:debug": "mocha --inspector --inspect-brk test.js"
   },
   "repository": {
     "type": "git",
@@ -36,8 +37,8 @@
     "eventemitter3": "1.2.x"
   },
   "devDependencies": {
-    "assume": "1.4.x",
-    "mocha": "2.5.x",
+    "assume": "2.0.x",
+    "mocha": "5.1.x",
     "pre-commit": "1.1.x"
   }
 }
